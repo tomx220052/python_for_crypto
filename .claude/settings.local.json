@@ -3,7 +3,10 @@
     "allow": [
       "Bash(pip3 install:*)",
       "Bash(python3:*)",
-      "WebFetch(domain:docs.coingecko.com)"
+      "WebFetch(domain:docs.coingecko.com)",
+      "Bash(mkdir:*)",
+      "Bash(chmod:*)",
+      "Bash(tree:*)"
     ],
     "deny": [],
     "ask": []
