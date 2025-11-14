@@ -10,8 +10,11 @@
 - 圖形化介面，操作簡單直覺
 - 即時顯示查詢進度和統計資訊
 - 支援一鍵匯出 CSV
-- **使用說明：** 請參考 [`GUI_USAGE.md`](GUI_USAGE.md)
-- **快速啟動：** `python3 crypto_price_gui.py`
+- **快速開始：** 請參考 [`快速開始.md`](快速開始.md) 或 [`INSTALLATION.md`](INSTALLATION.md)
+- **一鍵啟動：**
+  - Windows：雙擊 `start_gui.bat`
+  - macOS/Linux：雙擊 `start_gui.sh` 或執行 `./start_gui.sh`
+- **詳細說明：** [`GUI_USAGE.md`](GUI_USAGE.md)
 
 ### ⌨️ 命令列版本（推薦給進階使用者）
 - 適合自動化腳本和批次處理
