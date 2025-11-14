@@ -17,13 +17,12 @@ class CoinGeckoPriceFetcher:
 
     BASE_URL = "https://api.coingecko.com/api/v3"
 
-    def __init__(self, api_key=None, delay=10):
+    def __init__(self, api_key=None):
         """
         初始化
         :param api_key: CoinGecko API key（可選）
-        :param delay: API 調用間隔秒數（避免 rate limit，預設 5 秒）
         """
-        self.delay = delay
+        self.api_key = api_key
         self.session = requests.Session()
         # headers = {
         #     'User-Agent': 'Mozilla/5.0 (Crypto Price Tool)'
@@ -32,77 +31,159 @@ class CoinGeckoPriceFetcher:
         #     headers['x-cg-pro-api-key'] = api_key
         # self.session.headers.update(headers)
 
-    def get_price_on_date(self, coin_id, date_str, max_retries=20):
+    def _date_to_timestamp(self, date_str):
         """
-        取得指定日期的價格（含重試機制）
-        :param coin_id: CoinGecko 的幣種 ID（如 bitcoin）
+        將 YYYY-MM-DD 轉換為 UNIX timestamp (秒)，使用 UTC 時區
         :param date_str: 日期字串，格式：YYYY-MM-DD
-        :param max_retries: 最大重試次數
-        :return: 價格（整數）或 None
+        :return: UNIX timestamp (秒)
         """
-        # 轉換日期格式：YYYY-MM-DD -> dd-mm-yyyy（CoinGecko API 要求格式）
+        from datetime import timezone
+        # 將日期視為 UTC 00:00:00
+        dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+
+    def _timestamp_to_date(self, timestamp_ms):
+        """
+        將 UNIX timestamp (毫秒) 轉換為 YYYY-MM-DD，使用 UTC 時區
+        :param timestamp_ms: UNIX timestamp (毫秒)
+        :return: 日期字串，格式：YYYY-MM-DD
+        """
+        from datetime import timezone
+        # 使用 UTC 時區轉換，避免受系統時區影響
+        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d")
+
+    def get_range_prices_api(self, coin_id, from_date, to_date, max_retries=3, debug=False):
+        """
+        使用 market_chart/range API 取得日期區間內的價格
+        :param coin_id: CoinGecko 的幣種 ID（如 bitcoin）
+        :param from_date: 開始日期，格式：YYYY-MM-DD
+        :param to_date: 結束日期，格式：YYYY-MM-DD
+        :param max_retries: 最大重試次數
+        :param debug: 是否顯示詳細 debug 資訊
+        :return: 價格資料字典 {date: price} 或 None
+        """
         try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            api_date = dt.strftime("%Y-%m-%d")  # 轉換為 dd-mm-yyyy
-        except ValueError:
-            print(f"錯誤：日期格式不正確：{date_str}", file=sys.stderr)
+            from datetime import timezone, timedelta
+            # from_date 需要往前推一天，因為該日數據來自前一天的 16:00 UTC
+            from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            from_dt = from_dt - timedelta(days=1)  # 往前推一天
+            from_ts = int(from_dt.timestamp())
+
+            # to_date 要延伸到當天的 23:59:59，確保包含當天 16:00 的數據
+            to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            to_dt = to_dt.replace(hour=23, minute=59, second=59)
+            to_ts = int(to_dt.timestamp())
+        except ValueError as e:
+            print(f"錯誤：日期格式不正確：{e}", file=sys.stderr)
             return None
 
-        url = f"{self.BASE_URL}/coins/{coin_id}/history"
+        url = f"{self.BASE_URL}/coins/{coin_id}/market_chart/range"
         params = {
-            'date': api_date,
-            'localization': 'false',
-            'x-cg-pro-api-key': 'CG-2wCtiaEmkTfLhz6PUsQDyBiR'
+            'vs_currency': 'usd',
+            'from': from_ts,
+            'to': to_ts
         }
+
+        # 如果有 API key，添加到參數中（並啟用 daily interval）
+        if self.api_key:
+            params['x_cg_pro_api_key'] = self.api_key
+            params['interval'] = 'daily'  # daily interval 是付費功能
 
         for attempt in range(max_retries):
             try:
-                response = self.session.get(url, params=params, timeout=10)
+                response = self.session.get(url, params=params, timeout=30)
 
                 if response.status_code == 404:
-                    if attempt == 0:  # 只在第一次顯示錯誤
-                        print(f"錯誤：找不到幣種 '{coin_id}'", file=sys.stderr)
+                    print(f"錯誤：找不到幣種 '{coin_id}'", file=sys.stderr)
                     return None
                 elif response.status_code == 429:
                     wait_time = 5
-                    print(f"警告：API 請求過於頻繁，等待 {wait_time} 秒...", file=sys.stderr)
+                    print(f"警告：API 請求過於頻繁 (429)，等待 {wait_time} 秒...", file=sys.stderr)
+                    print(f"響應內容：{response.text}", file=sys.stderr)
                     time.sleep(wait_time)
                     continue
+                elif response.status_code == 401:
+                    print(f"錯誤：API 認證失敗 (401)", file=sys.stderr)
+                    print(f"響應內容：{response.text}", file=sys.stderr)
+                    return None
 
                 response.raise_for_status()
                 data = response.json()
 
-                # 取得市場資料
-                if 'market_data' in data and 'current_price' in data['market_data']:
-                    price_usd = data['market_data']['current_price'].get('usd', None)
-                    if price_usd is not None:
-                        # 四捨五入到整數
-                        return round(price_usd)
-                    else:
-                        if attempt == max_retries - 1:
-                            return None
-                else:
-                    if attempt == max_retries - 1:
-                        return None
+                # 解析 prices 陣列
+                if 'prices' not in data:
+                    print("錯誤：API 返回資料格式不正確", file=sys.stderr)
+                    return None
+
+                prices_array = data['prices']
+                if not prices_array:
+                    print("警告：API 返回空資料", file=sys.stderr)
+                    return {}
+
+                # 將 timestamp 按日期分組（處理同日多筆數據）
+                # 注意：CoinGecko 的邏輯是 UTC 16:00 的價格算作次日
+                from collections import defaultdict
+                from datetime import timedelta
+                daily_prices = defaultdict(list)
+
+                for timestamp_ms, price in prices_array:
+                    dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+
+                    # 如果時間 >= 16:00，算作次日的數據
+                    if dt.hour >= 16:
+                        dt = dt + timedelta(days=1)
+
+                    date_str = dt.strftime("%Y-%m-%d")
+                    daily_prices[date_str].append((timestamp_ms, price))  # 保存 timestamp 和 price
+
+                # 每日取最接近 UTC 16:00 的價格（CoinGecko 標準每日結算時間）
+                # 注意：歸類到某日的數據實際上來自前一天的 16:xx
+                result = {}
+                for date_str in sorted(daily_prices.keys()):
+                    price_data = daily_prices[date_str]  # [(timestamp_ms, price), ...]
+
+                    # 計算前一天 UTC 16:00 的時間戳（毫秒）
+                    # 因為歸類到 date_str 的數據實際上是前一天 >= 16:00 的數據
+                    target_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                        hour=16, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+                    )
+                    target_dt = target_dt - timedelta(days=1)  # 前一天的 16:00
+                    target_ts_ms = int(target_dt.timestamp() * 1000)
+
+                    # 找到最接近前一天 UTC 16:00 的數據點
+                    closest = min(price_data, key=lambda x: abs(x[0] - target_ts_ms))
+
+                    if debug:
+                        # 顯示詳細的時間資訊
+                        closest_dt = datetime.fromtimestamp(closest[0] / 1000, tz=timezone.utc)
+                        time_diff = abs(closest[0] - target_ts_ms) / 1000 / 60  # 分鐘
+                        print(f"  {date_str}: 目標前日 UTC 16:00, 實際選擇 {closest_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC (差距 {time_diff:.1f} 分鐘)", file=sys.stderr)
+
+                    result[date_str] = round(closest[1])  # 四捨五入到整數
+
+                return result
 
             except requests.exceptions.RequestException as e:
                 if attempt == max_retries - 1:
-                    print(f"錯誤：請求 {date_str} 的資料時發生錯誤：{e}", file=sys.stderr)
+                    print(f"錯誤：請求資料時發生錯誤：{e}", file=sys.stderr)
                     return None
                 time.sleep(2)  # 錯誤後等待 2 秒再重試
             except Exception as e:
                 if attempt == max_retries - 1:
-                    print(f"錯誤：處理 {date_str} 的資料時發生錯誤：{e}", file=sys.stderr)
+                    print(f"錯誤：處理資料時發生錯誤：{e}", file=sys.stderr)
                     return None
+                time.sleep(2)
 
         return None
 
-    def get_range_prices(self, coin_id, from_date, to_date):
+    def get_range_prices(self, coin_id, from_date, to_date, debug=False):
         """
         取得日期區間內所有日期的價格
         :param coin_id: CoinGecko 的幣種 ID
         :param from_date: 開始日期（YYYY-MM-DD）
         :param to_date: 結束日期（YYYY-MM-DD）
+        :param debug: 是否顯示詳細 debug 資訊
         :return: 價格資料列表
         """
         # 轉換為 datetime 物件
@@ -113,37 +194,41 @@ class CoinGeckoPriceFetcher:
         delta = end_dt - start_dt
         num_days = delta.days + 1  # 包含結束日期
 
-        prices = []
-        current_dt = start_dt
-
         print(f"開始取得 {coin_id} 從 {from_date} 到 {to_date} 的價格資料...")
         print(f"共需查詢 {num_days} 天，請稍候...")
         print("-" * 50)
 
+        # 使用新 API 一次取得所有資料
+        price_dict = self.get_range_prices_api(coin_id, from_date, to_date, debug=debug)
+
+        if price_dict is None:
+            return []
+
+        # 建立完整的日期列表，補充缺失的日期
+        prices = []
+        current_dt = start_dt
+
         for i in range(num_days):
             date_str = current_dt.strftime("%Y-%m-%d")
-            print(f"查詢 {date_str}...", end=' ')
-
-            price = self.get_price_on_date(coin_id, date_str)
+            price = price_dict.get(date_str, None)
 
             if price is not None:
                 prices.append({
                     'date': date_str,
                     'price': price
                 })
-                print(f"✓ {price}")
+                print(f"{date_str}: ✓ ${price:,}")
             else:
                 prices.append({
                     'date': date_str,
                     'price': None
                 })
-                print("✗ 無資料")
-
-            # 加入延遲（最後一天不需要延遲）
-            if i < num_days - 1:
-                time.sleep(self.delay)
+                print(f"{date_str}: ✗ 無資料")
 
             current_dt += timedelta(days=1)
+
+        print("-" * 50)
+        print(f"查詢完成！取得 {len([p for p in prices if p['price'] is not None])} / {num_days} 天的資料")
 
         return prices
 
@@ -242,8 +327,8 @@ def parse_arguments():
   # 取得 Ethereum 在特定區間的價格並指定輸出檔案
   python crypto_price_tool.py ethereum --from 2024-01-01 --to 2024-01-10 --output eth_jan.csv
 
-  # 自訂 API 請求延遲時間
-  python crypto_price_tool.py bitcoin --from 2024-01-01 --to 2024-01-31 --delay 2
+  # 使用自訂 API key
+  python crypto_price_tool.py bitcoin --from 2024-01-01 --to 2024-01-31 --api-key YOUR_API_KEY
 
 常見幣種 ID：
   bitcoin, ethereum, tether, binancecoin, ripple, cardano, dogecoin, solana,
@@ -279,17 +364,17 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        '-d', '--delay',
-        type=float,
-        help='API 請求間隔秒數（預設：10 秒）',
-        default=10.0
-    )
-
-    parser.add_argument(
         '-k', '--api-key',
         dest='api_key',
         help='CoinGecko API key（Pro 版本）',
         default=None
+    )
+
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='顯示詳細的時間篩選資訊（用於驗證 UTC 16:00 邏輯）',
+        default=False
     )
 
     return parser.parse_args()
@@ -319,15 +404,14 @@ def main():
         print(f"幣種 ID：{args.coin_id}")
         print(f"日期區間：{args.from_date} ~ {args.to_date}")
         print(f"查詢天數：{delta.days + 1} 天")
-        print(f"API 請求間隔：{args.delay} 秒")
         print("=" * 50)
         print()
 
         # 建立 fetcher
-        fetcher = CoinGeckoPriceFetcher(api_key=args.api_key, delay=args.delay)
+        fetcher = CoinGeckoPriceFetcher(api_key=args.api_key)
 
         # 取得價格資料
-        prices = fetcher.get_range_prices(args.coin_id, args.from_date, args.to_date)
+        prices = fetcher.get_range_prices(args.coin_id, args.from_date, args.to_date, debug=args.debug)
 
         if not prices:
             print("\n錯誤：無法取得任何價格資料", file=sys.stderr)
