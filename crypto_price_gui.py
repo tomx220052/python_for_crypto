@@ -7,10 +7,13 @@
 import customtkinter as ctk
 import threading
 import sys
+import os
+import time
 from datetime import datetime
 from tkinter import messagebox, filedialog
 from src.core import CoinGeckoPriceFetcher
 from src.utils import validate_date_range, save_to_csv, calculate_statistics
+from src.constants import COIN_LIST, COIN_MAPPING
 
 
 class CryptoPriceGUI(ctk.CTk):
@@ -61,18 +64,22 @@ class CryptoPriceGUI(ctk.CTk):
         )
         input_title.pack(pady=(10, 15), padx=20, anchor="w")
 
-        # 幣種輸入（文字輸入框）
-        coin_label = ctk.CTkLabel(input_frame, text="幣種 ID：", font=ctk.CTkFont(size=14))
+        # 幣種選擇（下拉選單）
+        coin_label = ctk.CTkLabel(input_frame, text="選擇幣種：", font=ctk.CTkFont(size=14))
         coin_label.pack(pady=(5, 5), padx=20, anchor="w")
 
-        self.coin_entry = ctk.CTkEntry(
+        # 建立幣種選項列表（最前面加入「全部」選項）
+        coin_options = ["全部 - All Coins"] + [f"{coin['symbol']} - {coin['name']}" for coin in COIN_LIST]
+
+        self.coin_combobox = ctk.CTkComboBox(
             input_frame,
-            placeholder_text="例如：bitcoin, ethereum, tether",
+            values=coin_options,
             width=400,
-            height=35
+            height=35,
+            state="readonly"  # 只能選擇，不能手動輸入
         )
-        self.coin_entry.pack(pady=(0, 10), padx=20, anchor="w")
-        self.coin_entry.insert(0, "bitcoin")  # 預設值
+        self.coin_combobox.pack(pady=(0, 10), padx=20, anchor="w")
+        self.coin_combobox.set("BTC - Bitcoin")  # 預設值
 
         # 日期區間
         date_label = ctk.CTkLabel(input_frame, text="日期區間：", font=ctk.CTkFont(size=14))
@@ -117,7 +124,7 @@ class CryptoPriceGUI(ctk.CTk):
         # 提示
         date_hint = ctk.CTkLabel(
             input_frame,
-            text="ℹ️  最多 100 天",
+            text="ℹ️  最多 365 天",
             font=ctk.CTkFont(size=12),
             text_color="gray"
         )
@@ -267,16 +274,12 @@ class CryptoPriceGUI(ctk.CTk):
             return
 
         # 取得輸入值
-        coin_id = self.coin_entry.get().strip()
+        selected_coin = self.coin_combobox.get()
         from_date = self.from_date_entry.get().strip()
         to_date = self.to_date_entry.get().strip()
         api_key = self.api_key_entry.get().strip() or None
 
         # 基本驗證
-        if not coin_id:
-            messagebox.showerror("錯誤", "請輸入幣種 ID")
-            return
-
         if not from_date or not to_date:
             messagebox.showerror("錯誤", "請輸入日期區間")
             return
@@ -288,13 +291,28 @@ class CryptoPriceGUI(ctk.CTk):
             messagebox.showerror("錯誤", str(e))
             return
 
-        # 在新執行緒中執行查詢
-        thread = threading.Thread(
-            target=self.perform_query,
-            args=(coin_id, from_date, to_date, api_key),
-            daemon=True
-        )
-        thread.start()
+        # 檢查是否選擇批量查詢
+        if selected_coin == "全部 - All Coins":
+            # 批量查詢所有幣種
+            thread = threading.Thread(
+                target=self.perform_batch_query,
+                args=(from_date, to_date, api_key),
+                daemon=True
+            )
+            thread.start()
+        else:
+            # 單一幣種查詢
+            coin_id = COIN_MAPPING.get(selected_coin, None)
+            if not coin_id:
+                messagebox.showerror("錯誤", "請選擇幣種")
+                return
+
+            thread = threading.Thread(
+                target=self.perform_query,
+                args=(coin_id, from_date, to_date, api_key),
+                daemon=True
+            )
+            thread.start()
 
     def perform_query(self, coin_id, from_date, to_date, api_key):
         """執行查詢（在背景執行緒）"""
@@ -341,13 +359,121 @@ class CryptoPriceGUI(ctk.CTk):
             self.is_querying = False
             self.after(0, lambda: self.query_button.configure(state="normal", text="🔍 開始查詢"))
 
+    def perform_batch_query(self, from_date, to_date, api_key):
+        """批量查詢所有幣種（在背景執行緒）"""
+        self.is_querying = True
+
+        # 更新 UI
+        self.after(0, lambda: self.query_button.configure(state="disabled", text="批量查詢中..."))
+        self.after(0, lambda: self.export_button.configure(state="disabled"))
+        self.after(0, lambda: self.result_text.delete("1.0", "end"))
+        self.after(0, lambda: self.progress_bar.set(0))
+
+        # 創建輸出目錄
+        output_dir = "./csv_file"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("錯誤", f"無法創建目錄 {output_dir}：{e}"))
+            self.is_querying = False
+            self.after(0, lambda: self.query_button.configure(state="normal", text="🔍 開始查詢"))
+            return
+
+        # 初始化統計
+        total_coins = len(COIN_LIST)
+        success_count = 0
+        failed_coins = []
+
+        self.after(0, lambda: self.update_status(f"開始批量查詢 {total_coins} 個幣種..."))
+
+        try:
+            # 建立 fetcher
+            fetcher = CoinGeckoPriceFetcher(api_key=api_key)
+
+            # 遍歷所有幣種
+            for index, coin in enumerate(COIN_LIST, start=1):
+                coin_id = coin['id']
+                coin_symbol = coin['symbol']
+
+                # 更新進度
+                progress = index / total_coins
+                self.after(0, lambda p=progress: self.progress_bar.set(p))
+                self.after(0, lambda i=index, t=total_coins, s=coin_symbol:
+                          self.progress_label.configure(text=f"正在查詢 {s} ({i}/{t})..."))
+                self.after(0, lambda i=index, t=total_coins, s=coin_symbol:
+                          self.update_status(f"查詢 {s} ({i}/{t})..."))
+
+                try:
+                    # 查詢價格
+                    prices = fetcher.get_range_prices(
+                        coin_id,
+                        from_date,
+                        to_date,
+                        debug=False,
+                        progress_callback=None  # 批量查詢時不顯示單個幣種的進度
+                    )
+
+                    if prices:
+                        # 保存 CSV
+                        output_file = os.path.join(output_dir, f"{coin_id}_{from_date}_{to_date}.csv")
+                        save_to_csv(prices, coin_id, from_date, to_date, output_file=output_file)
+                        success_count += 1
+
+                        # 在結果區域添加成功訊息
+                        self.after(0, lambda s=coin_symbol, cid=coin_id:
+                                  self.result_text.insert("end", f"✓ {s} ({cid}) - 查詢成功\n"))
+                    else:
+                        failed_coins.append(f"{coin_symbol} ({coin_id})")
+                        self.after(0, lambda s=coin_symbol, cid=coin_id:
+                                  self.result_text.insert("end", f"✗ {s} ({cid}) - 無資料\n"))
+
+                except Exception as e:
+                    failed_coins.append(f"{coin_symbol} ({coin_id}): {str(e)}")
+                    self.after(0, lambda s=coin_symbol, cid=coin_id, err=str(e):
+                              self.result_text.insert("end", f"✗ {s} ({cid}) - 錯誤: {err}\n"))
+
+                # 每次查詢後延遲 5 秒，避免 API 限制
+                if index < total_coins:  # 最後一個不需要延遲
+                    time.sleep(5)
+
+            # 顯示統計摘要
+            failed_count = len(failed_coins)
+            summary = f"\n{'='*60}\n"
+            summary += f"批量查詢完成\n"
+            summary += f"{'='*60}\n"
+            summary += f"成功：{success_count} 個幣種\n"
+            summary += f"失敗：{failed_count} 個幣種\n"
+            summary += f"輸出目錄：{output_dir}\n"
+
+            if failed_coins:
+                summary += f"\n失敗清單：\n"
+                for failed in failed_coins:
+                    summary += f"  - {failed}\n"
+
+            self.after(0, lambda s=summary: self.result_text.insert("end", s))
+            self.after(0, lambda sc=success_count, tc=total_coins:
+                      self.update_status(f"批量查詢完成！成功 {sc}/{tc} 個幣種"))
+
+            # 顯示完成提示
+            self.after(0, lambda sc=success_count, tc=total_coins, od=output_dir:
+                      messagebox.showinfo("完成", f"批量查詢完成！\n成功：{sc}/{tc}\n檔案已保存至：{od}"))
+
+        except Exception as e:
+            self.after(0, lambda err=str(e): messagebox.showerror("錯誤", f"批量查詢時發生錯誤：{err}"))
+            self.after(0, lambda: self.update_status("批量查詢失敗"))
+
+        finally:
+            self.is_querying = False
+            self.after(0, lambda: self.query_button.configure(state="normal", text="🔍 開始查詢"))
+            self.after(0, lambda: self.progress_bar.set(1.0))
+
     def update_progress(self, current, total, date, price, success):
         """更新進度（回調函數）"""
         progress = current / total
         self.after(0, lambda: self.progress_bar.set(progress))
 
         if success:
-            status = f"✓ ${price:,}"
+            status = f"✓ ${price:,.8f}"
         else:
             status = "✗ 無資料"
 
@@ -373,9 +499,9 @@ class CryptoPriceGUI(ctk.CTk):
             date = price_data['date']
             price = price_data['price']
             if price is not None:
-                self.result_text.insert("end", f"{date:<15} ${price:>15,}       ✓\n")
+                self.result_text.insert("end", f"{date:<15} ${price:>18,.8f}       ✓\n")
             else:
-                self.result_text.insert("end", f"{date:<15} {'N/A':>15}       ✗\n")
+                self.result_text.insert("end", f"{date:<15} {'N/A':>18}       ✗\n")
 
         self.result_text.insert("end", "-" * 60 + "\n")
 
@@ -383,13 +509,13 @@ class CryptoPriceGUI(ctk.CTk):
         stats = calculate_statistics(prices)
 
         if stats['avg'] is not None:
-            self.avg_label.value_label.configure(text=f"${stats['avg']:,}")
-            self.max_label.value_label.configure(text=f"${stats['max']:,}")
-            self.min_label.value_label.configure(text=f"${stats['min']:,}")
+            self.avg_label.value_label.configure(text=f"${stats['avg']:,.8f}")
+            self.max_label.value_label.configure(text=f"${stats['max']:,.8f}")
+            self.min_label.value_label.configure(text=f"${stats['min']:,.8f}")
 
-            self.result_text.insert("end", f"\n平均價格：${stats['avg']:,}\n")
-            self.result_text.insert("end", f"最高價格：${stats['max']:,}\n")
-            self.result_text.insert("end", f"最低價格：${stats['min']:,}\n")
+            self.result_text.insert("end", f"\n平均價格：${stats['avg']:,.8f}\n")
+            self.result_text.insert("end", f"最高價格：${stats['max']:,.8f}\n")
+            self.result_text.insert("end", f"最低價格：${stats['min']:,.8f}\n")
             self.result_text.insert("end", f"有效資料：{stats['valid_count']} / {stats['total_count']} 天\n")
         else:
             self.avg_label.value_label.configure(text="N/A")
@@ -404,7 +530,8 @@ class CryptoPriceGUI(ctk.CTk):
             return
 
         # 取得參數
-        coin_id = self.coin_entry.get().strip()
+        selected_coin = self.coin_combobox.get()
+        coin_id = COIN_MAPPING.get(selected_coin, "unknown")
         from_date = self.from_date_entry.get().strip()
         to_date = self.to_date_entry.get().strip()
 

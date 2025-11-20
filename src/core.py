@@ -43,7 +43,7 @@ class CoinGeckoPriceFetcher:
         dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
         return dt.strftime("%Y-%m-%d")
 
-    def get_range_prices_api(self, coin_id, from_date, to_date, max_retries=3, debug=False):
+    def get_range_prices_api(self, coin_id, from_date, to_date, max_retries=5, debug=False):
         """
         使用 market_chart/range API 取得日期區間內的價格
         :param coin_id: CoinGecko 的幣種 ID（如 bitcoin）
@@ -87,7 +87,7 @@ class CoinGeckoPriceFetcher:
                     print(f"錯誤：找不到幣種 '{coin_id}'", file=sys.stderr)
                     return None
                 elif response.status_code == 429:
-                    wait_time = 5
+                    wait_time = 15
                     print(f"警告：API 請求過於頻繁 (429)，等待 {wait_time} 秒...", file=sys.stderr)
                     print(f"響應內容：{response.text}", file=sys.stderr)
                     time.sleep(wait_time)
@@ -146,8 +146,9 @@ class CoinGeckoPriceFetcher:
                         closest_dt = datetime.fromtimestamp(closest[0] / 1000, tz=timezone.utc)
                         time_diff = abs(closest[0] - target_ts_ms) / 1000 / 60  # 分鐘
                         print(f"  {date_str}: 目標前日 UTC 16:00, 實際選擇 {closest_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC (差距 {time_diff:.1f} 分鐘)", file=sys.stderr)
+                        print(f"            原始價格: ${closest[1]:.10f}, round 後: ${round(closest[1], 8):.8f}", file=sys.stderr)
 
-                    result[date_str] = round(closest[1])  # 四捨五入到整數
+                    result[date_str] = round(closest[1], 8)  # 四捨五入到小數點後八位
 
                 return result
 

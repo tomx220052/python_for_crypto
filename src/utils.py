@@ -21,11 +21,6 @@ def validate_date(date_str, date_name="日期"):
     except ValueError:
         raise ValueError(f"{date_name} 格式錯誤，請使用 YYYY-MM-DD 格式（如：2024-01-01）")
 
-    # 驗證不早於 2025-01-01
-    min_date = datetime(2025, 1, 1)
-    if dt < min_date:
-        raise ValueError(f"{date_name} 不能早於 2025-01-01")
-
     # 驗證不是未來日期
     today = datetime.now()
     if dt > today:
@@ -49,10 +44,10 @@ def validate_date_range(from_date_str, to_date_str):
     if from_dt >= to_dt:
         raise ValueError("開始日期必須早於結束日期")
 
-    # 驗證日期區間不超過 100 天
+    # 驗證日期區間不超過 365 天
     delta = to_dt - from_dt
-    if delta.days >= 100:
-        raise ValueError(f"日期區間不能超過 100 天（目前：{delta.days + 1} 天）")
+    if delta.days >= 365:
+        raise ValueError(f"日期區間不能超過 365 天（目前：{delta.days + 1} 天）")
 
     return from_dt, to_dt
 
@@ -74,7 +69,7 @@ def save_to_csv(prices, coin_id, from_date, to_date, output_file=None):
     # 計算平均價格（排除 None）
     valid_prices = [p['price'] for p in prices if p['price'] is not None]
     if valid_prices:
-        avg_price = round(sum(valid_prices) / len(valid_prices))
+        avg_price = round(sum(valid_prices) / len(valid_prices), 8)
     else:
         avg_price = None
 
@@ -126,7 +121,7 @@ def calculate_statistics(prices):
         }
 
     return {
-        'avg': round(sum(valid_prices) / len(valid_prices)),
+        'avg': round(sum(valid_prices) / len(valid_prices), 8),
         'max': max(valid_prices),
         'min': min(valid_prices),
         'valid_count': len(valid_prices),
