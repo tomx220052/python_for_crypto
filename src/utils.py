@@ -40,9 +40,9 @@ def validate_date_range(from_date_str, to_date_str):
     from_dt = validate_date(from_date_str, "開始日期")
     to_dt = validate_date(to_date_str, "結束日期")
 
-    # 驗證 from < to
-    if from_dt >= to_dt:
-        raise ValueError("開始日期必須早於結束日期")
+    # 驗證 from <= to（允許單日查詢）
+    if from_dt > to_dt:
+        raise ValueError("開始日期不能晚於結束日期")
 
     # 驗證日期區間不超過 365 天
     delta = to_dt - from_dt

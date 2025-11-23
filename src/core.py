@@ -43,7 +43,7 @@ class CoinGeckoPriceFetcher:
         dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
         return dt.strftime("%Y-%m-%d")
 
-    def get_range_prices_api(self, coin_id, from_date, to_date, max_retries=5, debug=False):
+    def get_range_prices_api(self, coin_id, from_date, to_date, max_retries=20, debug=False, cancellation_check=None):
         """
         使用 market_chart/range API 取得日期區間內的價格
         :param coin_id: CoinGecko 的幣種 ID（如 bitcoin）
@@ -80,6 +80,10 @@ class CoinGeckoPriceFetcher:
             params['interval'] = 'daily'  # daily interval 是付費功能
 
         for attempt in range(max_retries):
+            # 檢查是否被取消
+            if cancellation_check and cancellation_check():
+                return None  # 立即返回，放棄查詢
+
             try:
                 response = self.session.get(url, params=params, timeout=30)
 
@@ -87,6 +91,9 @@ class CoinGeckoPriceFetcher:
                     print(f"錯誤：找不到幣種 '{coin_id}'", file=sys.stderr)
                     return None
                 elif response.status_code == 429:
+                    # 在等待前檢查是否被取消
+                    if cancellation_check and cancellation_check():
+                        return None
                     wait_time = 15
                     print(f"警告：API 請求過於頻繁 (429)，等待 {wait_time} 秒...", file=sys.stderr)
                     print(f"響應內容：{response.text}", file=sys.stderr)
@@ -156,16 +163,22 @@ class CoinGeckoPriceFetcher:
                 if attempt == max_retries - 1:
                     print(f"錯誤：請求資料時發生錯誤：{e}", file=sys.stderr)
                     return None
+                # 在等待前檢查是否被取消
+                if cancellation_check and cancellation_check():
+                    return None
                 time.sleep(2)  # 錯誤後等待 2 秒再重試
             except Exception as e:
                 if attempt == max_retries - 1:
                     print(f"錯誤：處理資料時發生錯誤：{e}", file=sys.stderr)
                     return None
+                # 在等待前檢查是否被取消
+                if cancellation_check and cancellation_check():
+                    return None
                 time.sleep(2)
 
         return None
 
-    def get_range_prices(self, coin_id, from_date, to_date, debug=False, progress_callback=None):
+    def get_range_prices(self, coin_id, from_date, to_date, debug=False, progress_callback=None, cancellation_check=None):
         """
         取得日期區間內所有日期的價格
         :param coin_id: CoinGecko 的幣種 ID
@@ -184,7 +197,7 @@ class CoinGeckoPriceFetcher:
         num_days = delta.days + 1  # 包含結束日期
 
         # 使用新 API 一次取得所有資料
-        price_dict = self.get_range_prices_api(coin_id, from_date, to_date, debug=debug)
+        price_dict = self.get_range_prices_api(coin_id, from_date, to_date, debug=debug, cancellation_check=cancellation_check)
 
         if price_dict is None:
             return []

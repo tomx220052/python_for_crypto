@@ -33,6 +33,7 @@ class CryptoPriceGUI(ctk.CTk):
         # 資料儲存
         self.prices_data = []
         self.is_querying = False
+        self.is_batch_query_cancelled = False
 
         # 建立 UI
         self.setup_ui()
@@ -359,12 +360,19 @@ class CryptoPriceGUI(ctk.CTk):
             self.is_querying = False
             self.after(0, lambda: self.query_button.configure(state="normal", text="🔍 開始查詢"))
 
+    def on_cancel_batch_query(self):
+        """終止批量查詢"""
+        self.is_batch_query_cancelled = True
+        self.after(0, lambda: self.query_button.configure(text="正在終止...", state="disabled"))
+        self.after(0, lambda: self.update_status("正在終止批量查詢..."))
+
     def perform_batch_query(self, from_date, to_date, api_key):
         """批量查詢所有幣種（在背景執行緒）"""
         self.is_querying = True
+        self.is_batch_query_cancelled = False  # 重置終止標誌
 
         # 更新 UI
-        self.after(0, lambda: self.query_button.configure(state="disabled", text="批量查詢中..."))
+        self.after(0, lambda: self.query_button.configure(state="normal", text="🛑 終止查詢", command=self.on_cancel_batch_query))
         self.after(0, lambda: self.export_button.configure(state="disabled"))
         self.after(0, lambda: self.result_text.delete("1.0", "end"))
         self.after(0, lambda: self.progress_bar.set(0))
@@ -392,6 +400,11 @@ class CryptoPriceGUI(ctk.CTk):
 
             # 遍歷所有幣種
             for index, coin in enumerate(COIN_LIST, start=1):
+                # 檢查是否被取消
+                if self.is_batch_query_cancelled:
+                    self.after(0, lambda: self.result_text.insert("end", f"\n⚠️  批量查詢已被使用者終止\n"))
+                    break
+
                 coin_id = coin['id']
                 coin_symbol = coin['symbol']
 
@@ -404,14 +417,20 @@ class CryptoPriceGUI(ctk.CTk):
                           self.update_status(f"查詢 {s} ({i}/{t})..."))
 
                 try:
-                    # 查詢價格
+                    # 查詢價格（傳遞取消檢查函數）
                     prices = fetcher.get_range_prices(
                         coin_id,
                         from_date,
                         to_date,
                         debug=False,
-                        progress_callback=None  # 批量查詢時不顯示單個幣種的進度
+                        progress_callback=None,  # 批量查詢時不顯示單個幣種的進度
+                        cancellation_check=lambda: self.is_batch_query_cancelled
                     )
+
+                    # 檢查查詢後是否被取消
+                    if self.is_batch_query_cancelled:
+                        self.after(0, lambda: self.result_text.insert("end", f"\n⚠️  批量查詢已被使用者終止\n"))
+                        break
 
                     if prices:
                         # 保存 CSV
@@ -419,27 +438,39 @@ class CryptoPriceGUI(ctk.CTk):
                         save_to_csv(prices, coin_id, from_date, to_date, output_file=output_file)
                         success_count += 1
 
-                        # 在結果區域添加成功訊息
-                        self.after(0, lambda s=coin_symbol, cid=coin_id:
-                                  self.result_text.insert("end", f"✓ {s} ({cid}) - 查詢成功\n"))
+                        # 計算平均價格
+                        stats = calculate_statistics(prices)
+                        if stats['avg'] is not None:
+                            # 在結果區域顯示平均價格
+                            self.after(0, lambda s=coin_symbol, cid=coin_id, avg=stats['avg']:
+                                      self.result_text.insert("end", f"✓ {s} ({cid}) - 平均價格: ${avg:.8f}\n"))
+                        else:
+                            # 無有效價格數據
+                            self.after(0, lambda s=coin_symbol, cid=coin_id:
+                                      self.result_text.insert("end", f"✗ {s} ({cid}) - NaN\n"))
                     else:
                         failed_coins.append(f"{coin_symbol} ({coin_id})")
                         self.after(0, lambda s=coin_symbol, cid=coin_id:
-                                  self.result_text.insert("end", f"✗ {s} ({cid}) - 無資料\n"))
+                                  self.result_text.insert("end", f"✗ {s} ({cid}) - NaN\n"))
 
                 except Exception as e:
                     failed_coins.append(f"{coin_symbol} ({coin_id}): {str(e)}")
-                    self.after(0, lambda s=coin_symbol, cid=coin_id, err=str(e):
-                              self.result_text.insert("end", f"✗ {s} ({cid}) - 錯誤: {err}\n"))
+                    self.after(0, lambda s=coin_symbol, cid=coin_id:
+                              self.result_text.insert("end", f"✗ {s} ({cid}) - NaN\n"))
 
-                # 每次查詢後延遲 5 秒，避免 API 限制
+                # 每次查詢後延遲 0.5 秒，避免 API 限制
                 if index < total_coins:  # 最後一個不需要延遲
-                    time.sleep(5)
+                    time.sleep(0.5)
 
             # 顯示統計摘要
             failed_count = len(failed_coins)
             summary = f"\n{'='*60}\n"
-            summary += f"批量查詢完成\n"
+
+            if self.is_batch_query_cancelled:
+                summary += f"批量查詢已終止\n"
+            else:
+                summary += f"批量查詢完成\n"
+
             summary += f"{'='*60}\n"
             summary += f"成功：{success_count} 個幣種\n"
             summary += f"失敗：{failed_count} 個幣種\n"
@@ -451,12 +482,19 @@ class CryptoPriceGUI(ctk.CTk):
                     summary += f"  - {failed}\n"
 
             self.after(0, lambda s=summary: self.result_text.insert("end", s))
-            self.after(0, lambda sc=success_count, tc=total_coins:
-                      self.update_status(f"批量查詢完成！成功 {sc}/{tc} 個幣種"))
 
-            # 顯示完成提示
-            self.after(0, lambda sc=success_count, tc=total_coins, od=output_dir:
-                      messagebox.showinfo("完成", f"批量查詢完成！\n成功：{sc}/{tc}\n檔案已保存至：{od}"))
+            if self.is_batch_query_cancelled:
+                self.after(0, lambda sc=success_count, tc=total_coins:
+                          self.update_status(f"批量查詢已終止！已完成 {sc}/{tc} 個幣種"))
+                # 顯示終止提示
+                self.after(0, lambda sc=success_count, tc=total_coins, od=output_dir:
+                          messagebox.showwarning("已終止", f"批量查詢已終止！\n已完成：{sc}/{tc}\n檔案已保存至：{od}"))
+            else:
+                self.after(0, lambda sc=success_count, tc=total_coins:
+                          self.update_status(f"批量查詢完成！成功 {sc}/{tc} 個幣種"))
+                # 顯示完成提示
+                self.after(0, lambda sc=success_count, tc=total_coins, od=output_dir:
+                          messagebox.showinfo("完成", f"批量查詢完成！\n成功：{sc}/{tc}\n檔案已保存至：{od}"))
 
         except Exception as e:
             self.after(0, lambda err=str(e): messagebox.showerror("錯誤", f"批量查詢時發生錯誤：{err}"))
@@ -464,7 +502,7 @@ class CryptoPriceGUI(ctk.CTk):
 
         finally:
             self.is_querying = False
-            self.after(0, lambda: self.query_button.configure(state="normal", text="🔍 開始查詢"))
+            self.after(0, lambda: self.query_button.configure(state="normal", text="🔍 開始查詢", command=self.on_query_clicked))
             self.after(0, lambda: self.progress_bar.set(1.0))
 
     def update_progress(self, current, total, date, price, success):
